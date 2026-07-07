@@ -176,7 +176,11 @@ function divisionExpressionFromResultAndDivisor(num, divisor) {
 
     var dividend = num * divisor;
 
-    return dividend + " ÷ " + divisor;
+    return dividend + " " + getDivisionSymbol() + " " + divisor;
+}
+
+function getDivisionSymbol() {
+    return String.fromCharCode(247);
 }
 
 
