@@ -87,6 +87,7 @@ var CONFIG = {
         layerName: "Math Answer Key",
         hidden: true,
         textSize: 6,
+        groupName: "MathAnswerKey_Auto",
     },
 
     // Layer that math text frames are created on. Auto-unlocked/shown before generation.
@@ -94,7 +95,17 @@ var CONFIG = {
 
     // Layer that receives duplicates of shapes too small to hold text (left empty).
     preprintLayerName: "Preprint shapes",
+
+    // Wraps each generated layer's contents in one named group.
+    groupGeneratedItems: true,
+    mathTextGroupName: "MathOperations_Auto",
+    preprintGroupName: "PreprintShapes_Auto",
 };
+
+// Cache of measured text metrics, keyed by expression string (prefixed to
+// avoid collisions with Object.prototype names).
+var TEXT_METRICS_CACHE = {};
+var TEXT_METRICS_REF_SIZE = 20;
 
 main();
 
@@ -148,9 +159,18 @@ function main() {
 
     var preset = buildPresetFromSettings(dialogResult, sortedPalette.length);
 
+    var excludedColorsLookup = {};
+    var dialogExcludedColors = dialogResult.excludedColors || [];
+    for (var exIdx = 0; exIdx < dialogExcludedColors.length; exIdx++) {
+        excludedColorsLookup["x_" + dialogExcludedColors[exIdx]] = true;
+    }
+
     var colorToAnswer = {};
     for (var hex in dialogResult.colorAnswers) {
         if (dialogResult.colorAnswers.hasOwnProperty(hex)) {
+            if (excludedColorsLookup.hasOwnProperty("x_" + hex)) {
+                continue;
+            }
             var parsed = parseAnswer(dialogResult.colorAnswers[hex]);
             if (parsed.ok) {
                 colorToAnswer[hex] = parsed;
@@ -158,6 +178,7 @@ function main() {
         }
     }
     preset.colorToAnswer = colorToAnswer;
+    preset.excludedColors = excludedColorsLookup;
 
     var hexCounts = {};
     for (var pi = 0; pi < sortedPalette.length; pi++) {
@@ -185,6 +206,13 @@ function main() {
         // Ignore - fall through and let processPathItems surface any error.
     }
 
+    var previousUserInteractionLevel = app.userInteractionLevel;
+    try {
+        app.userInteractionLevel = UserInteractionLevel.DONTDISPLAYALERTS;
+    } catch (setInteractionLevelError) {
+        // Ignore.
+    }
+
     var randomFn = createRandomFn(CONFIG.randomSeed);
     var result = processPathItems(doc, pathItems, preset, randomFn, textLayer);
     result.uniqueColors = sortedPalette.length;
@@ -193,6 +221,12 @@ function main() {
     if (CONFIG.legend.enabled) {
         var legendEntries = buildLegendEntriesFromPalette(sortedPalette, preset.colorToAnswer);
         createLegend(doc, legendEntries);
+    }
+
+    try {
+        app.userInteractionLevel = previousUserInteractionLevel;
+    } catch (restoreInteractionLevelError) {
+        // Ignore.
     }
 
     try {
@@ -223,19 +257,25 @@ function ensureWritableTextLayer(doc) {
         } catch (unhideError) {
             // Ignore.
         }
-        return existing;
+        if (isLayerWritable(doc, existing)) {
+            return existing;
+        }
     }
 
     try {
         var created = doc.layers.add();
         created.name = CONFIG.mathTextLayerName;
-        return created;
+        if (isLayerWritable(doc, created)) {
+            return created;
+        }
     } catch (createError) {
         // Fall through to the fallback search below.
     }
 
-    for (var i = 0; i < doc.layers.length; i++) {
-        var candidate = doc.layers[i];
+    var docLayers = doc.layers;
+    var docLayersLength = docLayers.length;
+    for (var i = 0; i < docLayersLength; i++) {
+        var candidate = docLayers[i];
         try {
             candidate.locked = false;
         } catch (unlockCandidateError) {
@@ -247,12 +287,7 @@ function ensureWritableTextLayer(doc) {
             // Ignore.
         }
 
-        var writable = false;
-        try {
-            writable = candidate.locked === false && candidate.visible === true;
-        } catch (checkError) {
-            writable = false;
-        }
+        var writable = isLayerWritable(doc, candidate);
 
         if (writable) {
             return candidate;
@@ -260,6 +295,49 @@ function ensureWritableTextLayer(doc) {
     }
 
     return null;
+}
+
+function isLayerWritable(doc, layer) {
+    var previousActiveLayer = null;
+    try {
+        previousActiveLayer = doc.activeLayer;
+    } catch (getActiveLayerError) {
+        // Ignore.
+    }
+
+    var writable = false;
+    try {
+        doc.activeLayer = layer;
+        var probe = layer.pathItems.add();
+        probe.remove();
+        writable = true;
+    } catch (probeError) {
+        writable = false;
+    }
+
+    try {
+        doc.activeLayer = previousActiveLayer;
+    } catch (restoreActiveLayerError) {
+        // Ignore.
+    }
+
+    return writable;
+}
+
+function ensureItemOnLayer(item, layer) {
+    if (!item || !layer) {
+        return item;
+    }
+
+    try {
+        if (item.layer !== layer) {
+            item.move(layer, ElementPlacement.PLACEATEND);
+        }
+    } catch (ensureItemOnLayerError) {
+        // Ignore.
+    }
+
+    return item;
 }
 
 /* --- Live Paint pre-processing --- */
@@ -308,8 +386,10 @@ function collectLivePaintGroups(item, list) {
     }
 
     if (item.typename === "GroupItem") {
-        for (var i = 0; i < item.pageItems.length; i++) {
-            collectLivePaintGroups(item.pageItems[i], list);
+        var pageItems = item.pageItems;
+        var pageItemsLength = pageItems.length;
+        for (var i = 0; i < pageItemsLength; i++) {
+            collectLivePaintGroups(pageItems[i], list);
         }
     }
 }
@@ -391,9 +471,11 @@ function splitLivePaintExpandedItem(item) {
     }
 
     var childGroups = [];
-    for (var i = 0; i < item.pageItems.length; i++) {
-        if (item.pageItems[i].typename === "GroupItem") {
-            childGroups.push(item.pageItems[i]);
+    var itemPageItems = item.pageItems;
+    var itemPageItemsLength = itemPageItems.length;
+    for (var i = 0; i < itemPageItemsLength; i++) {
+        if (itemPageItems[i].typename === "GroupItem") {
+            childGroups.push(itemPageItems[i]);
         }
     }
 
@@ -447,8 +529,10 @@ function splitLivePaintExpandedItem(item) {
 
 function preprocessLivePaint(doc) {
     var groups = [];
-    for (var i = 0; i < doc.selection.length; i++) {
-        collectLivePaintGroups(doc.selection[i], groups);
+    var docSelection = doc.selection;
+    var docSelectionLength = docSelection.length;
+    for (var i = 0; i < docSelectionLength; i++) {
+        collectLivePaintGroups(docSelection[i], groups);
     }
 
     if (groups.length === 0) {
@@ -481,8 +565,10 @@ function preprocessLivePaint(doc) {
     }
 
     var expandedItems = [];
-    for (var j = 0; j < doc.selection.length; j++) {
-        expandedItems.push(doc.selection[j]);
+    var expandedSelection = doc.selection;
+    var expandedSelectionLength = expandedSelection.length;
+    for (var j = 0; j < expandedSelectionLength; j++) {
+        expandedItems.push(expandedSelection[j]);
     }
 
     var fillGroups = [];
@@ -688,6 +774,7 @@ function buildDefaultSettings() {
         preprintLayerName: CONFIG.preprintLayerName,
 
         colorAnswers: {},
+        excludedColors: [],
     };
 }
 
@@ -701,6 +788,7 @@ function overlaySettings(base, overlay) {
         if (
             overlay.hasOwnProperty(key) &&
             key !== "colorAnswers" &&
+            key !== "excludedColors" &&
             overlay[key] !== null &&
             overlay[key] !== undefined
         ) {
@@ -714,6 +802,13 @@ function overlaySettings(base, overlay) {
             if (overlay.colorAnswers.hasOwnProperty(hex)) {
                 result.colorAnswers[hex] = overlay.colorAnswers[hex];
             }
+        }
+    }
+
+    result.excludedColors = [];
+    if (overlay.excludedColors) {
+        for (var exIdx = 0; exIdx < overlay.excludedColors.length; exIdx++) {
+            result.excludedColors.push(overlay.excludedColors[exIdx]);
         }
     }
 
@@ -1736,14 +1831,17 @@ function buildFractionExpression(answerRational, fractionSettings, randomFn) {
     }
 
     var pick = candidates[Math.floor(randomFn() * candidates.length)];
-    var symbol =
-        op === "addition"
-            ? "+"
-            : op === "subtraction"
-              ? "-"
-              : op === "multiplication"
-                ? "x"
-                : getDivisionSymbol();
+    // Plain if/else on purpose: ExtendScript mis-evaluates chained ternaries.
+    var symbol;
+    if (op === "addition") {
+        symbol = "+";
+    } else if (op === "subtraction") {
+        symbol = "-";
+    } else if (op === "multiplication") {
+        symbol = "x";
+    } else {
+        symbol = getDivisionSymbol();
+    }
 
     return formatOperand(pick.x) + " " + symbol + " " + formatOperand(pick.y);
 }
@@ -2104,6 +2202,7 @@ function showMainDialog(palette, initialSettings) {
     var rowsList = [];
     var scrollbar = null;
     var listViewHeight = 320;
+    var colorListWidth = 394;
     var lastWindowHeight = null;
 
     var topGroup = dialog.add("group");
@@ -2115,12 +2214,12 @@ function showMainDialog(palette, initialSettings) {
     var leftCol = topGroup.add("group");
     leftCol.orientation = "column";
     leftCol.alignChildren = ["fill", "top"];
-    leftCol.preferredSize.width = 340;
 
     var modePanel = leftCol.add("panel", undefined, "Mode");
     modePanel.orientation = "column";
     modePanel.alignChildren = ["fill", "top"];
-    modePanel.margins = 10;
+    modePanel.margins = 8;
+    modePanel.spacing = 4;
 
     var modeDropdown = modePanel.add(
         "dropdownlist",
@@ -2130,11 +2229,16 @@ function showMainDialog(palette, initialSettings) {
     var modeKeys = ["fixed", "random", "fraction"];
     modeDropdown.selection = indexOfValue(modeKeys, initialSettings.mode, 0);
 
+    var modeStack = modePanel.add("group");
+    modeStack.orientation = "stack";
+    modeStack.alignChildren = ["fill", "top"];
+
     // -- Fixed panel --
-    var fixedPanel = modePanel.add("panel", undefined, "Fixed table settings");
+    var fixedPanel = modeStack.add("panel", undefined, "Fixed table settings");
     fixedPanel.orientation = "column";
     fixedPanel.alignChildren = ["fill", "top"];
-    fixedPanel.margins = 8;
+    fixedPanel.margins = 6;
+    fixedPanel.spacing = 4;
 
     var fixedOpGroup = fixedPanel.add("group");
     var fixedMulRadio = fixedOpGroup.add("radiobutton", undefined, "Multiplication");
@@ -2146,8 +2250,15 @@ function showMainDialog(palette, initialSettings) {
     }
 
     var fixedFactorField = addLabeledField(fixedPanel, "Factor", initialSettings.fixedFactor);
-    var fixedMinFactorField = addLabeledField(fixedPanel, "Min factor", initialSettings.fixedMinFactor);
-    var fixedMaxFactorField = addLabeledField(fixedPanel, "Max factor", initialSettings.fixedMaxFactor);
+    var fixedFactorRange = addLabeledFieldPair(
+        fixedPanel,
+        "Min factor",
+        initialSettings.fixedMinFactor,
+        "Max factor",
+        initialSettings.fixedMaxFactor,
+    );
+    var fixedMinFactorField = fixedFactorRange[0];
+    var fixedMaxFactorField = fixedFactorRange[1];
     var fixedPreferFirstCheckbox = addCheckbox(
         fixedPanel,
         "Put the fixed factor first",
@@ -2157,17 +2268,19 @@ function showMainDialog(palette, initialSettings) {
     var fixedDivisorField = addLabeledField(fixedPanel, "Divisor", initialSettings.fixedDivisor);
     var fixedMaxDividendField = addLabeledField(
         fixedPanel,
-        "Max dividend (blank = auto)",
+        "Max dividend (blank=auto)",
         initialSettings.fixedMaxDividend === null || initialSettings.fixedMaxDividend === undefined
             ? ""
             : initialSettings.fixedMaxDividend,
+        150,
     );
 
     // -- Random panel --
-    var randomPanel = modePanel.add("panel", undefined, "Random settings");
+    var randomPanel = modeStack.add("panel", undefined, "Random settings");
     randomPanel.orientation = "column";
     randomPanel.alignChildren = ["fill", "top"];
-    randomPanel.margins = 8;
+    randomPanel.margins = 6;
+    randomPanel.spacing = 4;
 
     var randomOpGroup = randomPanel.add("group");
     var randomMulRadio = randomOpGroup.add("radiobutton", undefined, "Multiplication");
@@ -2181,10 +2294,24 @@ function showMainDialog(palette, initialSettings) {
         randomMulRadio.value = true;
     }
 
-    var randomMinFactorField = addLabeledField(randomPanel, "Min factor", initialSettings.randomMinFactor);
-    var randomMaxFactorField = addLabeledField(randomPanel, "Max factor", initialSettings.randomMaxFactor);
-    var randomMinDivisorField = addLabeledField(randomPanel, "Min divisor", initialSettings.randomMinDivisor);
-    var randomMaxDivisorField = addLabeledField(randomPanel, "Max divisor", initialSettings.randomMaxDivisor);
+    var randomFactorRange = addLabeledFieldPair(
+        randomPanel,
+        "Min factor",
+        initialSettings.randomMinFactor,
+        "Max factor",
+        initialSettings.randomMaxFactor,
+    );
+    var randomMinFactorField = randomFactorRange[0];
+    var randomMaxFactorField = randomFactorRange[1];
+    var randomDivisorRange = addLabeledFieldPair(
+        randomPanel,
+        "Min divisor",
+        initialSettings.randomMinDivisor,
+        "Max divisor",
+        initialSettings.randomMaxDivisor,
+    );
+    var randomMinDivisorField = randomDivisorRange[0];
+    var randomMaxDivisorField = randomDivisorRange[1];
     var randomMaxDividendField = addLabeledField(randomPanel, "Max dividend", initialSettings.randomMaxDividend);
     var randomizeOrderCheckbox = addCheckbox(
         randomPanel,
@@ -2193,10 +2320,11 @@ function showMainDialog(palette, initialSettings) {
     );
 
     // -- Fraction panel --
-    var fractionPanel = modePanel.add("panel", undefined, "Fractions settings");
+    var fractionPanel = modeStack.add("panel", undefined, "Fractions settings");
     fractionPanel.orientation = "column";
     fractionPanel.alignChildren = ["fill", "top"];
-    fractionPanel.margins = 8;
+    fractionPanel.margins = 6;
+    fractionPanel.spacing = 4;
 
     var fractionOpGroup = fractionPanel.add("group");
     var fractionAddRadio = fractionOpGroup.add("radiobutton", undefined, "Addition");
@@ -2249,42 +2377,73 @@ function showMainDialog(palette, initialSettings) {
         initialSettings.fractionAllowImproper,
     );
 
+    /* ---------------- MID COLUMN ---------------- */
+
+    var midCol = topGroup.add("group");
+    midCol.orientation = "column";
+    midCol.alignChildren = ["fill", "top"];
+
     // -- Output panel --
-    var outputPanel = leftCol.add("panel", undefined, "Output");
+    var outputPanel = midCol.add("panel", undefined, "Output");
     outputPanel.orientation = "column";
     outputPanel.alignChildren = ["fill", "top"];
     outputPanel.margins = 8;
+    outputPanel.spacing = 4;
 
-    var textSizeField = addLabeledField(outputPanel, "Text size", initialSettings.defaultTextSize);
-    var minTextSizeField = addLabeledField(outputPanel, "Min text size", initialSettings.minTextSize);
-    var rotateTextCheckbox = addCheckbox(
+    var textSizeRange = addLabeledFieldPair(
         outputPanel,
+        "Text size",
+        initialSettings.defaultTextSize,
+        "Min text size",
+        initialSettings.minTextSize,
+    );
+    var textSizeField = textSizeRange[0];
+    var minTextSizeField = textSizeRange[1];
+
+    var outputCheckboxRow = outputPanel.add("group");
+    var rotateTextCheckbox = addCheckbox(
+        outputCheckboxRow,
         "Rotate text with shape",
         initialSettings.rotateTextWithShape,
     );
     var autoContrastCheckbox = addCheckbox(
-        outputPanel,
+        outputCheckboxRow,
         "Auto text contrast",
         initialSettings.autoTextContrast,
     );
-    var createLegendCheckbox = addCheckbox(outputPanel, "Create legend", initialSettings.legendEnabled);
-    var legendColumnsField = addLabeledField(outputPanel, "Legend columns", initialSettings.legendMaxColumns);
+
+    var legendRow = outputPanel.add("group");
+    var createLegendCheckbox = addCheckbox(legendRow, "Create legend", initialSettings.legendEnabled);
+    legendRow.add("statictext", undefined, "Columns");
+    var legendColumnsField = legendRow.add(
+        "edittext",
+        undefined,
+        initialSettings.legendMaxColumns === null || initialSettings.legendMaxColumns === undefined
+            ? ""
+            : String(initialSettings.legendMaxColumns),
+    );
+    legendColumnsField.preferredSize.width = 50;
+
     var createAnswerKeyCheckbox = addCheckbox(
         outputPanel,
         "Create answer key layer",
         initialSettings.answerKeyEnabled,
     );
-    var seedField = addLabeledField(outputPanel, "Random seed", initialSettings.randomSeed);
+    var seedField = addLabeledField(outputPanel, "Random seed", initialSettings.randomSeed, 110);
     var mathTextLayerField = addLabeledField(
         outputPanel,
         "Math text layer",
         initialSettings.mathTextLayerName,
+        110,
     );
+    mathTextLayerField.preferredSize.width = 120;
     var preprintLayerField = addLabeledField(
         outputPanel,
         "Preprint layer",
         initialSettings.preprintLayerName,
+        110,
     );
+    preprintLayerField.preferredSize.width = 120;
 
     /* ---------------- RIGHT COLUMN ---------------- */
 
@@ -2300,7 +2459,8 @@ function showMainDialog(palette, initialSettings) {
     colorsPanel.orientation = "column";
     colorsPanel.alignChildren = ["fill", "top"];
     colorsPanel.margins = 8;
-    colorsPanel.preferredSize.width = 400;
+    colorsPanel.spacing = 4;
+    colorsPanel.preferredSize.width = 424;
 
     var headerRow = colorsPanel.add("group");
     var headerColor = headerRow.add("statictext", undefined, "Color");
@@ -2319,7 +2479,7 @@ function showMainDialog(palette, initialSettings) {
     var listPanel = scrollOuter.add("panel");
     listPanel.orientation = "column";
     listPanel.alignChildren = ["fill", "top"];
-    listPanel.preferredSize = [370, listViewHeight];
+    listPanel.preferredSize = [colorListWidth, listViewHeight];
     listPanel.margins = 2;
 
     var listGroup = listPanel.add("group");
@@ -2362,8 +2522,13 @@ function showMainDialog(palette, initialSettings) {
 
     var recommendRangeRow = colorsPanel.add("group");
     recommendRangeRow.orientation = "row";
-    var recommendMinField = addLabeledField(recommendRangeRow, "Recommended range min", 1);
-    var recommendMaxField = addLabeledField(recommendRangeRow, "Recommended range max", 100);
+    recommendRangeRow.add("statictext", undefined, "Recommend range:");
+    recommendRangeRow.add("statictext", undefined, "min");
+    var recommendMinField = recommendRangeRow.add("edittext", undefined, "1");
+    recommendMinField.preferredSize.width = 60;
+    recommendRangeRow.add("statictext", undefined, "max");
+    var recommendMaxField = recommendRangeRow.add("edittext", undefined, "100");
+    recommendMaxField.preferredSize.width = 60;
 
     /* ---------------- BOTTOM ROW ---------------- */
 
@@ -2418,6 +2583,7 @@ function showMainDialog(palette, initialSettings) {
         fixedPanel.preferredSize = [-1, -1];
         randomPanel.preferredSize = [-1, -1];
         fractionPanel.preferredSize = [-1, -1];
+        modeStack.preferredSize = [-1, -1];
         if (modePanel) {
             modePanel.preferredSize = [-1, -1];
         }
@@ -2535,6 +2701,13 @@ function showMainDialog(palette, initialSettings) {
             for (var i = 0; i < rowsList.length; i++) {
                 s.colorAnswers[rowsList[i].hex] = rowsList[i].answerEdit.text;
             }
+
+            s.excludedColors = [];
+            for (var j = 0; j < rowsList.length; j++) {
+                if (!rowsList[j].includeCheck.value) {
+                    s.excludedColors.push(rowsList[j].hex);
+                }
+            }
         }
 
         return s;
@@ -2608,6 +2781,10 @@ function showMainDialog(palette, initialSettings) {
             s.preprintLayerName === undefined || s.preprintLayerName === null
                 ? ""
                 : String(s.preprintLayerName);
+
+        for (var rowIdx = 0; rowIdx < rowsList.length; rowIdx++) {
+            rowsList[rowIdx].includeCheck.value = !isHexExcluded(s.excludedColors, rowsList[rowIdx].hex);
+        }
 
         updateModeVisibility();
         updateFixedFieldStates();
@@ -2871,6 +3048,23 @@ function showMainDialog(palette, initialSettings) {
 
     /* ---------------- Resizing ---------------- */
 
+    function applyListViewHeight() {
+        if (!listPanel || !listGroup) {
+            return;
+        }
+        listPanel.preferredSize = [colorListWidth, listViewHeight];
+        if (scrollbar) {
+            scrollbar.preferredSize.height = listViewHeight;
+            scrollbar.maxvalue = Math.max(0, listGroup.preferredSize.height - listViewHeight);
+            if (scrollbar.value > scrollbar.maxvalue) {
+                scrollbar.value = scrollbar.maxvalue;
+            }
+            listGroup.location = [0, -scrollbar.value];
+        } else {
+            listGroup.location = [0, 0];
+        }
+    }
+
     dialog.onResizing = dialog.onResize = function () {
         this.layout.resize();
 
@@ -2887,19 +3081,7 @@ function showMainDialog(palette, initialSettings) {
 
             if (listPanel && listGroup) {
                 listViewHeight = Math.max(80, listViewHeight + delta);
-                listPanel.preferredSize = [370, listViewHeight];
-
-                var contentHeightNow = listGroup.preferredSize.height;
-                if (scrollbar) {
-                    scrollbar.maxvalue = Math.max(0, contentHeightNow - listViewHeight);
-                    if (scrollbar.value > scrollbar.maxvalue) {
-                        scrollbar.value = scrollbar.maxvalue;
-                    }
-                    scrollbar.preferredSize.height = listViewHeight;
-                    listGroup.location = [0, -scrollbar.value];
-                } else {
-                    listGroup.location = [0, 0];
-                }
+                applyListViewHeight();
             }
 
             this.layout.resize();
@@ -2916,8 +3098,42 @@ function showMainDialog(palette, initialSettings) {
     updateFractionFieldStates();
     runAutoFill();
     overlayColorAnswers(initialSettings.colorAnswers);
+    for (var initRowIdx = 0; initRowIdx < rowsList.length; initRowIdx++) {
+        rowsList[initRowIdx].includeCheck.value = !isHexExcluded(initialSettings.excludedColors, rowsList[initRowIdx].hex);
+    }
+
+    var scr = null;
+    var screenH = 800;
+    var screenW = 1280;
+    try {
+        scr = ($.screens && $.screens.length) ? $.screens[0] : null;
+        screenH = scr ? (scr.bottom - scr.top) : 800;
+        screenW = scr ? (scr.right - scr.left) : 1280;
+    } catch (screenError) {
+        scr = null;
+        screenH = 800;
+        screenW = 1280;
+    }
+    var maxDialogH = screenH - 100;
+
+    dialog.layout.layout(true);
+    if (dialog.size.height > maxDialogH) {
+        listViewHeight = Math.max(100, listViewHeight - (dialog.size.height - maxDialogH));
+        applyListViewHeight();
+        dialog.layout.layout(true);
+    }
+
+    dialog.maximumSize = [screenW - 40, screenH - 40];
+    dialog.minimumSize = [700, 300];
 
     dialog.center();
+    try {
+        if (scr && dialog.location[1] < scr.top + 20) {
+            dialog.location = [dialog.location[0], scr.top + 20];
+        }
+    } catch (locationError) {
+        // Ignore - best-effort positioning.
+    }
 
     var ret = dialog.show();
     if (ret !== 1) {
@@ -2931,6 +3147,9 @@ function buildColorRow(parent, entry) {
     row.orientation = "row";
     row.alignChildren = ["left", "center"];
     row.spacing = 8;
+
+    var includeCheck = row.add("checkbox", undefined, "");
+    includeCheck.value = true;
 
     var swatch = row.add("panel");
     swatch.preferredSize = [22, 22];
@@ -2958,19 +3177,35 @@ function buildColorRow(parent, entry) {
     answerEdit.preferredSize.width = 110;
 
     row.answerEdit = answerEdit;
+    row.includeCheck = includeCheck;
     row.hex = entry.hex;
 
     return row;
 }
 
-function addLabeledField(parent, label, initialValue) {
+function addLabeledField(parent, label, initialValue, labelWidth) {
     var g = parent.add("group");
     g.orientation = "row";
     var lbl = g.add("statictext", undefined, label);
-    lbl.preferredSize.width = 160;
+    lbl.preferredSize.width = labelWidth === null || labelWidth === undefined ? 130 : labelWidth;
     var field = g.add("edittext", undefined, initialValue === null || initialValue === undefined ? "" : String(initialValue));
     field.preferredSize.width = 80;
     return field;
+}
+
+function addLabeledFieldPair(parent, label1, value1, label2, value2) {
+    var g = parent.add("group");
+    g.orientation = "row";
+    g.spacing = 6;
+    var lbl1 = g.add("statictext", undefined, label1);
+    lbl1.preferredSize.width = 70;
+    var field1 = g.add("edittext", undefined, value1 === null || value1 === undefined ? "" : String(value1));
+    field1.preferredSize.width = 50;
+    var lbl2 = g.add("statictext", undefined, label2);
+    lbl2.preferredSize.width = 70;
+    var field2 = g.add("edittext", undefined, value2 === null || value2 === undefined ? "" : String(value2));
+    field2.preferredSize.width = 50;
+    return [field1, field2];
 }
 
 function addCheckbox(parent, label, initialValue) {
@@ -3002,6 +3237,25 @@ function parseFloatSafe(text, fallback) {
  * Text-fitting pipeline (geometry / layout machinery - unchanged)
  * ------------------------------------------------------------------ */
 
+function duplicateToPreprintLayer(doc, preprintState, pathItem, mathTextLayer) {
+    if (!preprintState.layer) {
+        preprintState.layer = getOrCreateLayer(doc, CONFIG.preprintLayerName);
+        try {
+            doc.activeLayer = mathTextLayer;
+        } catch (reassertPreprintLayerError) {
+            // Ignore.
+        }
+    }
+    var duplicated = pathItem.duplicate(preprintState.layer, ElementPlacement.PLACEATEND);
+    ensureItemOnLayer(duplicated, preprintState.layer);
+    try {
+        doc.activeLayer = mathTextLayer;
+    } catch (reassertActiveLayerError) {
+        // Ignore.
+    }
+    return duplicated;
+}
+
 function processPathItems(doc, pathItems, preset, randomFn, mathTextLayer) {
     var stats = {
         totalPathItems: pathItems.length,
@@ -3009,8 +3263,10 @@ function processPathItems(doc, pathItems, preset, randomFn, mathTextLayer) {
         skippedHiddenOrLocked: 0,
         skippedNonRGB: 0,
         skippedNoMapping: 0,
+        skippedExcluded: 0,
         skippedNoExpression: 0,
         preprintShapes: 0,
+        excludedPreprintShapes: 0,
         errors: [],
         unmappedHex: [],
         usedEntries: {},
@@ -3019,7 +3275,6 @@ function processPathItems(doc, pathItems, preset, randomFn, mathTextLayer) {
     var answerKeyLayer = null;
     if (CONFIG.answerKey.enabled) {
         answerKeyLayer = getOrCreateLayer(doc, CONFIG.answerKey.layerName);
-        answerKeyLayer.visible = !CONFIG.answerKey.hidden;
         try {
             doc.activeLayer = mathTextLayer;
         } catch (reassertAnswerKeyLayerError) {
@@ -3027,7 +3282,8 @@ function processPathItems(doc, pathItems, preset, randomFn, mathTextLayer) {
         }
     }
 
-    var preprintLayer = null;
+    var preprintState = { layer: null };
+    var scratchTextFrame = createScratchTextFrame(mathTextLayer);
 
     for (var i = 0; i < pathItems.length; i++) {
         var pathItem = pathItems[i];
@@ -3043,6 +3299,14 @@ function processPathItems(doc, pathItems, preset, randomFn, mathTextLayer) {
         }
 
         var hexColor = rgbColorToHex(pathItem.fillColor).toUpperCase();
+
+        if (preset.excludedColors && preset.excludedColors.hasOwnProperty("x_" + hexColor)) {
+            duplicateToPreprintLayer(doc, preprintState, pathItem, mathTextLayer);
+            stats.excludedPreprintShapes++;
+            stats.skippedExcluded++;
+            continue;
+        }
+
         var answerObj = preset.colorToAnswer[hexColor];
 
         if (!answerObj) {
@@ -3065,18 +3329,11 @@ function processPathItems(doc, pathItems, preset, randomFn, mathTextLayer) {
                 expression,
                 preset.textSize || CONFIG.defaultTextSize,
                 pathItem.fillColor,
+                scratchTextFrame,
             );
 
             if (!placement.ok) {
-                if (!preprintLayer) {
-                    preprintLayer = getOrCreateLayer(doc, CONFIG.preprintLayerName);
-                    try {
-                        doc.activeLayer = mathTextLayer;
-                    } catch (reassertPreprintLayerError) {
-                        // Ignore.
-                    }
-                }
-                pathItem.duplicate(preprintLayer, ElementPlacement.PLACEATEND);
+                duplicateToPreprintLayer(doc, preprintState, pathItem, mathTextLayer);
                 stats.preprintShapes++;
                 continue;
             }
@@ -3088,12 +3345,36 @@ function processPathItems(doc, pathItems, preset, randomFn, mathTextLayer) {
                 den: answerObj.den,
                 display: answerObj.display,
             };
-
-            if (answerKeyLayer) {
-                addAnswerKeyItem(answerKeyLayer, pathItem, expression, answerObj.display);
-            }
         } catch (e) {
-            stats.errors.push("PathItem " + (i + 1) + ": " + e);
+            stats.errors.push("Place text on pathItem " + (i + 1) + ": " + e);
+            continue;
+        }
+
+        if (answerKeyLayer) {
+            try {
+                addAnswerKeyItem(answerKeyLayer, pathItem, expression, answerObj.display);
+            } catch (answerKeyError) {
+                stats.errors.push("Answer key for pathItem " + (i + 1) + ": " + answerKeyError);
+            }
+            try {
+                doc.activeLayer = mathTextLayer;
+            } catch (reassertActiveLayerAfterAnswerKeyError) {
+                // Ignore.
+            }
+        }
+    }
+
+    disposeScratchTextFrame(scratchTextFrame);
+
+    groupLayerContents(mathTextLayer, CONFIG.mathTextGroupName);
+    groupLayerContents(preprintState.layer, CONFIG.preprintGroupName);
+    groupLayerContents(answerKeyLayer, CONFIG.answerKey.groupName);
+
+    if (answerKeyLayer && CONFIG.answerKey.hidden) {
+        try {
+            answerKeyLayer.visible = false;
+        } catch (hideAnswerKeyError) {
+            // Ignore.
         }
     }
 
@@ -3246,8 +3527,20 @@ function addAnswerKeyItem(layer, pathItem, expression, displayAnswer) {
     var centerX = (bounds[0] + bounds[2]) / 2;
     var centerY = (bounds[1] + bounds[3]) / 2;
 
+    try {
+        layer.locked = false;
+    } catch (unlockAnswerKeyLayerError) {
+        // Ignore.
+    }
+    try {
+        layer.visible = true;
+    } catch (unhideAnswerKeyLayerError) {
+        // Ignore.
+    }
+
     var text = layer.textFrames.pointText([centerX, centerY]);
     text.contents = expression + " = " + displayAnswer;
+    ensureItemOnLayer(text, layer);
     text.textRange.size = CONFIG.answerKey.textSize;
     text.textRange.fillColor = makeRGBColor(180, 20, 20);
 }
@@ -3428,18 +3721,30 @@ function isDarkColor(color) {
     return luma < CONFIG.darkLumaThreshold;
 }
 
-function createFittedTextFrame(doc, pathItem, expression, baseSize, fillColor) {
-    var polygon = getPolygonAnchors(pathItem);
-    var layoutOptions = getTextLayoutCandidates(pathItem, polygon);
+function createFittedTextFrame(
+    doc,
+    targetLayer,
+    pathItem,
+    expression,
+    baseSize,
+    fillColor,
+    polygon,
+    layoutOptions,
+    scratchTextFrame,
+) {
+    var metrics = getTextMetrics(scratchTextFrame, expression);
     var layoutBox = chooseBestTextLayout(
         doc,
+        targetLayer,
         layoutOptions,
         polygon,
         expression,
         baseSize,
+        metrics,
     );
-    var textFrame = doc.textFrames.pointText([0, 0]);
+    var textFrame = targetLayer.textFrames.pointText([0, 0]);
     textFrame.contents = expression;
+    ensureItemOnLayer(textFrame, targetLayer);
 
     formatTextFrame(textFrame, layoutBox.fittedSize, fillColor);
 
@@ -3450,6 +3755,17 @@ function createFittedTextFrame(doc, pathItem, expression, baseSize, fillColor) {
         centerPointTextInBox(textFrame, layoutBox);
     }
 
+    // Verification with fallback: the analytic size was computed from cached
+    // point-size metrics, so confirm it against the real, rendered frame once.
+    // If it does not actually fit, fall back to the existing stepwise shrink
+    // loop on the real frame so output can never regress.
+    if (!doesTextFitLayout(textFrame, layoutBox, polygon)) {
+        var verifiedSize = fitPointTextSize(textFrame, layoutBox, baseSize, polygon);
+        layoutBox.fittedSize = verifiedSize;
+        centerPointTextInBox(textFrame, layoutBox);
+        layoutBox.fits = doesTextFitLayout(textFrame, layoutBox, polygon);
+    }
+
     return { textFrame: textFrame, layoutBox: layoutBox };
 }
 
@@ -3457,7 +3773,7 @@ function createFittedTextFrame(doc, pathItem, expression, baseSize, fillColor) {
  * Stacked (vulgar) fraction rendering + preprint-shape handling
  * ------------------------------------------------------------------ */
 
-function placeExpressionForShape(doc, targetLayer, pathItem, expression, baseSize, fillColor) {
+function placeExpressionForShape(doc, targetLayer, pathItem, expression, baseSize, fillColor, scratchTextFrame) {
     try {
         doc.activeLayer = targetLayer;
     } catch (reassertTargetLayerError) {
@@ -3468,7 +3784,17 @@ function placeExpressionForShape(doc, targetLayer, pathItem, expression, baseSiz
     var layoutOptions = getTextLayoutCandidates(pathItem, polygon);
 
     if (expression.indexOf("/") === -1) {
-        var result = createFittedTextFrame(doc, pathItem, expression, baseSize, fillColor);
+        var result = createFittedTextFrame(
+            doc,
+            targetLayer,
+            pathItem,
+            expression,
+            baseSize,
+            fillColor,
+            polygon,
+            layoutOptions,
+            scratchTextFrame,
+        );
         var layoutBox = result.layoutBox;
 
         if (!layoutBox.fits || layoutBox.fittedSize < (CONFIG.minTextSize || 4)) {
@@ -3726,6 +4052,8 @@ function placeCompositeExpression(doc, targetLayer, pathItem, elements, layoutOp
 
         moveItemBoundsCenterTo(group, layoutBox.centerX, layoutBox.centerY);
 
+        ensureItemOnLayer(group, targetLayer);
+
         return group;
     }
 
@@ -3735,17 +4063,21 @@ function placeCompositeExpression(doc, targetLayer, pathItem, elements, layoutOp
 
 function chooseBestTextLayout(
     doc,
+    targetLayer,
     layoutOptions,
     polygon,
     expression,
     baseSize,
+    metrics,
 ) {
     var preferredHorizontal = findPreferredHorizontalLayout(
         doc,
+        targetLayer,
         layoutOptions,
         polygon,
         expression,
         baseSize,
+        metrics,
     );
     if (preferredHorizontal) {
         return preferredHorizontal;
@@ -3754,11 +4086,8 @@ function chooseBestTextLayout(
     var best = null;
 
     for (var i = 0; i < layoutOptions.length; i++) {
-        var trialTextFrame = doc.textFrames.pointText([0, 0]);
-        trialTextFrame.contents = expression;
-
-        var fittedSize = fitPointTextSize(
-            trialTextFrame,
+        var fittedSize = computeFittedSize(
+            metrics,
             layoutOptions[i],
             baseSize,
             polygon,
@@ -3766,8 +4095,9 @@ function chooseBestTextLayout(
 
         var candidate = shallowCopy(layoutOptions[i]);
         candidate.fittedSize = fittedSize;
-        candidate.fits = doesTextFitLayout(
-            trialTextFrame,
+        candidate.fits = doesMetricsFitLayout(
+            metrics,
+            fittedSize,
             layoutOptions[i],
             polygon,
         );
@@ -3775,8 +4105,6 @@ function chooseBestTextLayout(
         if (!best || isBetterLayoutCandidate(candidate, best)) {
             best = candidate;
         }
-
-        trialTextFrame.remove();
     }
 
     if (!best) {
@@ -3790,10 +4118,12 @@ function chooseBestTextLayout(
 
 function findPreferredHorizontalLayout(
     doc,
+    targetLayer,
     layoutOptions,
     polygon,
     expression,
     baseSize,
+    metrics,
 ) {
     var best = null;
 
@@ -3802,11 +4132,7 @@ function findPreferredHorizontalLayout(
             continue;
         }
 
-        var trialTextFrame = doc.textFrames.pointText([0, 0]);
-        trialTextFrame.contents = expression;
-        setTextFrameSize(trialTextFrame, baseSize);
-
-        if (doesTextFitLayout(trialTextFrame, layoutOptions[i], polygon)) {
+        if (doesMetricsFitLayout(metrics, baseSize, layoutOptions[i], polygon)) {
             var candidate = shallowCopy(layoutOptions[i]);
             candidate.fittedSize = baseSize;
             candidate.fits = true;
@@ -3815,8 +4141,6 @@ function findPreferredHorizontalLayout(
                 best = candidate;
             }
         }
-
-        trialTextFrame.remove();
     }
 
     return best;
@@ -3908,6 +4232,102 @@ function doesTextFitLayout(textFrame, layoutBox, polygon) {
         angle,
         polygon,
     );
+}
+
+function getTextMetrics(scratchFrame, expression) {
+    var key = "e_" + expression;
+    if (TEXT_METRICS_CACHE.hasOwnProperty(key)) {
+        return TEXT_METRICS_CACHE[key];
+    }
+
+    scratchFrame.contents = expression;
+    setTextFrameSize(scratchFrame, TEXT_METRICS_REF_SIZE);
+    var bounds = getItemBounds(scratchFrame);
+    var metrics = {
+        width: bounds.right - bounds.left,
+        height: bounds.top - bounds.bottom,
+    };
+
+    TEXT_METRICS_CACHE[key] = metrics;
+    return metrics;
+}
+
+function createScratchTextFrame(targetLayer) {
+    return targetLayer.textFrames.pointText([0, 0]);
+}
+
+function disposeScratchTextFrame(frame) {
+    try {
+        frame.remove();
+    } catch (disposeScratchTextFrameError) {
+        // Ignore.
+    }
+}
+
+function doesMetricsFitLayout(metrics, size, layoutBox, polygon) {
+    var textWidth = (metrics.width * size) / TEXT_METRICS_REF_SIZE;
+    var textHeight = (metrics.height * size) / TEXT_METRICS_REF_SIZE;
+    var angle = CONFIG.rotateTextWithShape ? layoutBox.angle : 0;
+
+    if (textWidth > layoutBox.width || textHeight > layoutBox.height) {
+        return false;
+    }
+
+    if (!polygon || polygon.length < 3) {
+        return true;
+    }
+
+    return doesOrientedRectFitPolygon(
+        layoutBox.centerX,
+        layoutBox.centerY,
+        textWidth,
+        textHeight,
+        angle,
+        polygon,
+    );
+}
+
+function computeFittedSize(metrics, layoutBox, baseSize, polygon) {
+    var minSize = CONFIG.minTextSize || 4;
+    var emergencyMinSize = CONFIG.emergencyMinTextSize || minSize;
+    if (emergencyMinSize > minSize) {
+        emergencyMinSize = minSize;
+    }
+
+    var scaledWidthAtBase = (metrics.width * baseSize) / TEXT_METRICS_REF_SIZE;
+    var scaledHeightAtBase = (metrics.height * baseSize) / TEXT_METRICS_REF_SIZE;
+
+    var scale = Math.min(
+        layoutBox.width / scaledWidthAtBase,
+        layoutBox.height / scaledHeightAtBase,
+    );
+
+    var currentSize = baseSize * scale;
+    if (currentSize > baseSize) {
+        currentSize = baseSize;
+    }
+    currentSize = Math.floor(currentSize * 4) / 4;
+
+    while (currentSize > minSize) {
+        if (doesMetricsFitLayout(metrics, currentSize, layoutBox, polygon)) {
+            break;
+        }
+
+        currentSize -= 0.25;
+    }
+
+    while (
+        currentSize > emergencyMinSize &&
+        !doesMetricsFitLayout(metrics, currentSize, layoutBox, polygon)
+    ) {
+        currentSize -= 0.25;
+    }
+
+    if (currentSize < emergencyMinSize) {
+        currentSize = emergencyMinSize;
+    }
+
+    return currentSize;
 }
 
 function centerPointTextInBox(textFrame, layoutBox) {
@@ -4043,13 +4463,15 @@ function buildFallbackTextBoxFromPolygon(polygon) {
 
 function getPolygonAnchors(pathItem) {
     var anchors = [];
+    var pathPoints = pathItem.pathPoints;
+    var pathPointsLength = pathPoints.length;
 
-    if (!pathItem.closed || pathItem.pathPoints.length < 3) {
+    if (!pathItem.closed || pathPointsLength < 3) {
         return anchors;
     }
 
-    for (var i = 0; i < pathItem.pathPoints.length; i++) {
-        var anchor = pathItem.pathPoints[i].anchor;
+    for (var i = 0; i < pathPointsLength; i++) {
+        var anchor = pathPoints[i].anchor;
         anchors.push({ x: anchor[0], y: anchor[1] });
     }
 
@@ -4117,17 +4539,22 @@ function findLargestAxisAlignedInnerBox(points) {
         return null;
     }
 
+    var intervalsBySampleY = [];
+    for (var s = 0; s < sampleYs.length; s++) {
+        intervalsBySampleY.push(getHorizontalIntervals(points, sampleYs[s]));
+    }
+
     var best = null;
 
     for (var start = 0; start < sampleYs.length - 1; start++) {
-        var overlapIntervals = getHorizontalIntervals(points, sampleYs[start]);
+        var overlapIntervals = intervalsBySampleY[start];
         if (overlapIntervals.length === 0) {
             continue;
         }
 
         for (var end = start + 1; end < sampleYs.length; end++) {
             var y = sampleYs[end];
-            var intervals = getHorizontalIntervals(points, y);
+            var intervals = intervalsBySampleY[end];
             if (intervals.length === 0) {
                 break;
             }
@@ -4591,7 +5018,8 @@ function hasSelection(doc) {
 }
 
 function collectPathItemsFromSelection(selection, output) {
-    for (var i = 0; i < selection.length; i++) {
+    var selectionLength = selection.length;
+    for (var i = 0; i < selectionLength; i++) {
         collectPathItems(selection[i], output);
     }
 }
@@ -4607,15 +5035,19 @@ function collectPathItems(item, output) {
     }
 
     if (item.typename === "GroupItem") {
-        for (var i = 0; i < item.pageItems.length; i++) {
-            collectPathItems(item.pageItems[i], output);
+        var pageItems = item.pageItems;
+        var pageItemsLength = pageItems.length;
+        for (var i = 0; i < pageItemsLength; i++) {
+            collectPathItems(pageItems[i], output);
         }
         return;
     }
 
     if (item.typename === "CompoundPathItem") {
-        for (var j = 0; j < item.pathItems.length; j++) {
-            output.push(item.pathItems[j]);
+        var itemPathItems = item.pathItems;
+        var itemPathItemsLength = itemPathItems.length;
+        for (var j = 0; j < itemPathItemsLength; j++) {
+            output.push(itemPathItems[j]);
         }
     }
 }
@@ -4686,9 +5118,11 @@ function getOrCreateLayer(doc, name) {
     }
 
     var layer = null;
-    for (var i = 0; i < doc.layers.length; i++) {
-        if (doc.layers[i].name === name) {
-            layer = doc.layers[i];
+    var docLayers = doc.layers;
+    var docLayersLength = docLayers.length;
+    for (var i = 0; i < docLayersLength; i++) {
+        if (docLayers[i].name === name) {
+            layer = docLayers[i];
             break;
         }
     }
@@ -4721,12 +5155,61 @@ function getOrCreateLayer(doc, name) {
 }
 
 function findGroupByName(layer, groupName) {
-    for (var i = 0; i < layer.groupItems.length; i++) {
-        if (layer.groupItems[i].name === groupName) {
-            return layer.groupItems[i];
+    var groupItems = layer.groupItems;
+    var groupItemsLength = groupItems.length;
+    for (var i = 0; i < groupItemsLength; i++) {
+        if (groupItems[i].name === groupName) {
+            return groupItems[i];
         }
     }
     return null;
+}
+
+function groupLayerContents(layer, groupName) {
+    if (!layer || !CONFIG.groupGeneratedItems) {
+        return null;
+    }
+
+    var group = findGroupByName(layer, groupName);
+    var createdGroup = false;
+    if (!group) {
+        group = layer.groupItems.add();
+        group.name = groupName;
+        createdGroup = true;
+    }
+
+    var items = [];
+    var pageItems = layer.pageItems;
+    var pageItemsLength = pageItems.length;
+    for (var i = 0; i < pageItemsLength; i++) {
+        var item = pageItems[i];
+        if (item.parent === layer && item !== group) {
+            items.push(item);
+        }
+    }
+
+    if (items.length === 0) {
+        if (createdGroup) {
+            try {
+                group.remove();
+            } catch (removeEmptyGroupError) {
+                // Ignore.
+            }
+        }
+        return null;
+    }
+
+    for (var j = 0; j < items.length; j++) {
+        try {
+            items[j].move(group, ElementPlacement.PLACEATEND);
+        } catch (moveIntoGroupError) {
+            // Ignore.
+        }
+    }
+
+    ensureItemOnLayer(group, layer);
+
+    return group;
 }
 
 function pushUnique(arr, value) {
@@ -4736,6 +5219,18 @@ function pushUnique(arr, value) {
         }
     }
     arr.push(value);
+}
+
+function isHexExcluded(excludedColors, hex) {
+    if (!excludedColors) {
+        return false;
+    }
+    for (var i = 0; i < excludedColors.length; i++) {
+        if (excludedColors[i] === hex) {
+            return true;
+        }
+    }
+    return false;
 }
 
 function shallowCopy(obj) {
@@ -4826,10 +5321,16 @@ function showSummary(stats, dialogResult) {
     lines.push("Skipped (hidden/locked): " + stats.skippedHiddenOrLocked);
     lines.push("Skipped (non-RGB fill): " + stats.skippedNonRGB);
     lines.push("Skipped (no mapping): " + stats.skippedNoMapping);
+    if (stats.skippedExcluded > 0) {
+        lines.push("Skipped (color excluded): " + stats.skippedExcluded);
+    }
     lines.push("Skipped (no valid expression): " + stats.skippedNoExpression);
 
     if (stats.preprintShapes > 0) {
         lines.push("Preprint shapes (too small for text): " + stats.preprintShapes);
+    }
+    if (stats.excludedPreprintShapes > 0) {
+        lines.push("Preprint shapes (excluded colors): " + stats.excludedPreprintShapes);
     }
 
     if (stats.unmappedHex.length > 0) {
