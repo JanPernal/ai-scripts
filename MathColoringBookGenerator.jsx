@@ -38,13 +38,15 @@ var CONFIG = {
     randomizeOperandOrder: true,
 
     // Fraction settings.
-    fractionOperation: "addition", // "addition" | "subtraction" | "multiplication" | "division"
+    fractionOperation: "addition", // "addition" | "subtraction" | "addsub" | "multiplication" | "division"
     fractionAnswerType: "fraction", // "fraction" | "integer"
     fractionMaxDenominator: 12,
     fractionMaxWholeMultiplier: 12,
     fractionRequireSimplified: false,
     fractionSameDenominatorOnly: true,
     fractionAllowImproper: false,
+    fractionConstantDenominator: false,
+    fractionDenominator: 4,
 
     // If true, text can rotate to follow the best-fitting inner box.
     rotateTextWithShape: true,
@@ -188,7 +190,7 @@ function main() {
     var probeRandomFn = createRandomFn(CONFIG.randomSeed);
     var unsatisfiable = findUnsatisfiableAnswers(preset.colorToAnswer, preset, probeRandomFn);
     if (unsatisfiable.length > 0) {
-        var proceed = confirm(buildUnsatisfiableMessage(unsatisfiable, hexCounts));
+        var proceed = confirm(buildUnsatisfiableMessage(unsatisfiable, hexCounts, preset));
         if (!proceed) {
             return;
         }
@@ -626,7 +628,7 @@ function findUnsatisfiableAnswers(colorAnswers, preset, randomFn) {
     return results;
 }
 
-function buildUnsatisfiableMessage(unsatisfiable, hexCounts) {
+function buildUnsatisfiableMessage(unsatisfiable, hexCounts, preset) {
     var maxLines = 12;
     var lines = [];
 
@@ -657,11 +659,16 @@ function buildUnsatisfiableMessage(unsatisfiable, hexCounts) {
         lines.push("... and " + (unsatisfiable.length - maxLines) + " more.");
     }
 
+    var hintLine = 'Try raising "Max denominator", turning on "Allow improper fractions",\n';
+    if (preset && preset.mode === "fraction" && isPresetConstantDenominatorActive(preset.fraction)) {
+        hintLine = 'Try turning on "Allow improper fractions", changing the constant denominator,\n';
+    }
+
     return (
         "These answers cannot be expressed with the current settings:\n\n" +
         lines.join("\n") +
         "\n\nThose shapes will be left without math text.\n\n" +
-        'Try raising "Max denominator", turning on "Allow improper fractions",\n' +
+        hintLine +
         "or choosing different answers.\n\n" +
         "Continue anyway?"
     );
@@ -761,6 +768,8 @@ function buildDefaultSettings() {
         fractionRequireSimplified: CONFIG.fractionRequireSimplified,
         fractionSameDenominatorOnly: CONFIG.fractionSameDenominatorOnly,
         fractionAllowImproper: CONFIG.fractionAllowImproper,
+        fractionConstantDenominator: CONFIG.fractionConstantDenominator,
+        fractionDenominator: CONFIG.fractionDenominator,
 
         defaultTextSize: CONFIG.defaultTextSize,
         minTextSize: CONFIG.minTextSize,
@@ -841,6 +850,8 @@ function applyDialogResultToConfig(s) {
     CONFIG.fractionRequireSimplified = s.fractionRequireSimplified;
     CONFIG.fractionSameDenominatorOnly = s.fractionSameDenominatorOnly;
     CONFIG.fractionAllowImproper = s.fractionAllowImproper;
+    CONFIG.fractionConstantDenominator = s.fractionConstantDenominator;
+    CONFIG.fractionDenominator = s.fractionDenominator;
 
     CONFIG.defaultTextSize = s.defaultTextSize;
     CONFIG.minTextSize = s.minTextSize;
@@ -924,6 +935,8 @@ function buildPresetFromSettings(s, colorCount) {
             requireSimplified: s.fractionRequireSimplified,
             sameDenominatorOnly: s.fractionSameDenominatorOnly,
             allowImproper: s.fractionAllowImproper,
+            constantDenominator: s.fractionConstantDenominator,
+            denominator: s.fractionDenominator,
         };
         return preset;
     }
@@ -1331,10 +1344,67 @@ function buildAutoAnswers(mode, settings, colorCount) {
             }
             return numbersToStrings(sortNumbersDescending(ints));
         }
+        if (isConstantDenominatorActive(settings)) {
+            return buildConstantDenominatorAnswerStrings(settings, colorCount);
+        }
         return buildFractionAnswerStrings(settings, colorCount);
     }
 
     return [];
+}
+
+function isConstantDenominatorActive(s) {
+    return (
+        s.mode === "fraction" &&
+        !!s.fractionConstantDenominator &&
+        (s.fractionOperation === "addition" ||
+            s.fractionOperation === "subtraction" ||
+            s.fractionOperation === "addsub")
+    );
+}
+
+function isPresetConstantDenominatorActive(fractionSettings) {
+    return (
+        !!fractionSettings &&
+        !!fractionSettings.constantDenominator &&
+        (fractionSettings.operation === "addition" ||
+            fractionSettings.operation === "subtraction" ||
+            fractionSettings.operation === "addsub")
+    );
+}
+
+function buildConstantDenominatorAnswerStrings(settings, colorCount) {
+    var d = settings.fractionDenominator;
+    var out = [];
+    if (!d || d < 2) {
+        return out;
+    }
+
+    var maxN = settings.fractionAllowImproper ? 3 * d : d - 1;
+    var pool = [];
+    for (var n = 1; n <= maxN; n++) {
+        if (n % d === 0) {
+            continue;
+        }
+        pool.push({ num: n, den: d, display: n + "/" + d });
+    }
+
+    if (pool.length < colorCount) {
+        var maxInt = Math.max(1, Math.floor(maxN / d));
+        for (var w = 1; w <= maxInt; w++) {
+            pool.push({ num: w * d, den: d, display: String(w) });
+        }
+    }
+
+    pool.sort(function (a, b) {
+        return b.num - a.num;
+    });
+
+    var picked = pickEvenlySpacedFractionsDescending(pool, colorCount);
+    for (var i = 0; i < picked.length; i++) {
+        out.push(picked[i].display);
+    }
+    return out;
 }
 
 function numbersToStrings(nums) {
@@ -1606,6 +1676,9 @@ function buildRecommendationCandidatePool(mode, settings) {
     }
 
     if (mode === "fraction" && settings.fractionAnswerType !== "integer") {
+        if (isConstantDenominatorActive(settings)) {
+            return buildConstantDenominatorScoreCandidates(settings);
+        }
         return buildFractionScoreCandidates(settings.fractionMaxDenominator, settings.fractionAllowImproper);
     }
 
@@ -1687,6 +1760,34 @@ function mergeScoreCandidates(listA, listB) {
     for (i = 0; i < order.length; i++) {
         var v = order[i];
         list.push({ numericValue: v, score: scores[v], display: String(v) });
+    }
+    return list;
+}
+
+function buildConstantDenominatorScoreCandidates(settings) {
+    var d = settings.fractionDenominator;
+    var list = [];
+    if (!d || d < 2) {
+        return list;
+    }
+
+    var maxN = settings.fractionAllowImproper ? 3 * d : d - 1;
+    for (var n = 1; n <= maxN; n++) {
+        if (n % d === 0) {
+            continue;
+        }
+        var pairs = buildSameDenominatorPairs(
+            makeRational(n, d),
+            d,
+            "addition",
+            settings.fractionAllowImproper,
+            3 * d,
+        );
+        var score = pairs.length;
+        if (score < 1) {
+            score = 1;
+        }
+        list.push({ numericValue: n / d, score: score, display: n + "/" + d });
     }
     return list;
 }
@@ -1779,7 +1880,53 @@ function formatOperand(r) {
     return r.num + "/" + r.den;
 }
 
+function buildSameDenominatorPairs(answerRational, d, op, allowImproper, maxNum) {
+    var pairs = [];
+    var totalF = ratValue(answerRational) * d;
+    var total = Math.round(totalF);
+    if (Math.abs(totalF - total) > 0.0000001 || total <= 0) {
+        return pairs;
+    }
+
+    // With improper fractions allowed, addends and the minuend grow with the
+    // answer (e.g. 10/2 = 12/2 - 2/2); maxNum only caps the subtrahend.
+    var limit = maxNum;
+    if (!allowImproper && d - 1 < limit) {
+        limit = d - 1;
+    }
+    var resultLimit = allowImproper ? total + limit : limit;
+
+    if (op === "addition") {
+        for (var a = 1; a < total; a++) {
+            var b = total - a;
+            if (a > resultLimit || b > resultLimit) {
+                continue;
+            }
+            if (pairs.length < 400) {
+                pairs.push({ x: rawRational(a, d), y: rawRational(b, d) });
+            }
+        }
+    } else {
+        for (var yb = 1; yb <= limit; yb++) {
+            var xa = yb + total;
+            if (xa > resultLimit) {
+                continue;
+            }
+            if (pairs.length < 400) {
+                pairs.push({ x: rawRational(xa, d), y: rawRational(yb, d) });
+            }
+        }
+    }
+    return pairs;
+}
+
 function buildFractionExpression(answerRational, fractionSettings, randomFn) {
+    var constantActive = isPresetConstantDenominatorActive(fractionSettings);
+
+    if (constantActive) {
+        return buildConstantDenominatorExpression(answerRational, fractionSettings, randomFn);
+    }
+
     if (fractionSettings.answerType === "integer") {
         return buildFractionIntegerExpression(
             answerRational,
@@ -1798,6 +1945,30 @@ function buildFractionExpression(answerRational, fractionSettings, randomFn) {
     var maxNum = maxDen * 3;
     var op = fractionSettings.operation;
     var candidates = [];
+
+    if (op === "addsub") {
+        var sameDenSettings = shallowCopy(fractionSettings);
+        sameDenSettings.sameDenominatorOnly = true;
+        var addCands = buildAddSubCandidates(answerRational, sameDenSettings, "addition", maxNum, maxDen);
+        var subCands = buildAddSubCandidates(answerRational, sameDenSettings, "subtraction", maxNum, maxDen);
+        var opOptions = [];
+        if (addCands && addCands.length > 0) {
+            opOptions.push({ symbol: "+", list: addCands });
+        }
+        if (subCands && subCands.length > 0) {
+            opOptions.push({ symbol: "-", list: subCands });
+        }
+        if (opOptions.length === 0) {
+            return null;
+        }
+        var chosenOp = opOptions[Math.floor(randomFn() * opOptions.length)];
+        var chosenList = chosenOp.list;
+        if (chosenList.length > 400) {
+            chosenList = chosenList.slice(0, 400);
+        }
+        var chosenPick = chosenList[Math.floor(randomFn() * chosenList.length)];
+        return formatOperand(chosenPick.x) + " " + chosenOp.symbol + " " + formatOperand(chosenPick.y);
+    }
 
     if (op === "addition" || op === "subtraction") {
         candidates = buildAddSubCandidates(
@@ -1844,6 +2015,38 @@ function buildFractionExpression(answerRational, fractionSettings, randomFn) {
     }
 
     return formatOperand(pick.x) + " " + symbol + " " + formatOperand(pick.y);
+}
+
+function buildConstantDenominatorExpression(answerRational, fractionSettings, randomFn) {
+    var d = fractionSettings.denominator;
+    var allowImproper = fractionSettings.allowImproper;
+    var op = fractionSettings.operation;
+    var options = [];
+
+    if (op === "addition" || op === "addsub") {
+        var addPairs = buildSameDenominatorPairs(answerRational, d, "addition", allowImproper, 3 * d);
+        if (addPairs.length > 0) {
+            options.push({ symbol: "+", list: addPairs });
+        }
+    }
+    if (op === "subtraction" || op === "addsub") {
+        var subPairs = buildSameDenominatorPairs(answerRational, d, "subtraction", allowImproper, 3 * d);
+        if (subPairs.length > 0) {
+            options.push({ symbol: "-", list: subPairs });
+        }
+    }
+
+    if (options.length === 0) {
+        return null;
+    }
+
+    var chosen = options[Math.floor(randomFn() * options.length)];
+    var list = chosen.list;
+    if (list.length > 400) {
+        list = list.slice(0, 400);
+    }
+    var pick = list[Math.floor(randomFn() * list.length)];
+    return formatOperand(pick.x) + " " + chosen.symbol + " " + formatOperand(pick.y);
 }
 
 function buildAddSubCandidates(answer, settings, op, maxNum, maxDen) {
@@ -2148,6 +2351,35 @@ function buildFractionIntegerExpression(answerRational, fractionSettings, random
                 }
             }
         }
+    } else if (op === "addsub") {
+        var asOps = ["addition", "subtraction"];
+        var asOptions = [];
+        for (var aoi = 0; aoi < asOps.length; aoi++) {
+            var asPairs = [];
+            for (var asd = 2; asd <= maxDen; asd++) {
+                var found = buildSameDenominatorPairs(
+                    makeRational(k, 1),
+                    asd,
+                    asOps[aoi],
+                    allowImproper,
+                    maxDen * 3,
+                );
+                for (var fi2 = 0; fi2 < found.length; fi2++) {
+                    if (asPairs.length < 400) {
+                        asPairs.push(found[fi2]);
+                    }
+                }
+            }
+            if (asPairs.length > 0) {
+                asOptions.push({ symbol: aoi === 0 ? "+" : "-", list: asPairs });
+            }
+        }
+        if (asOptions.length === 0) {
+            return null;
+        }
+        var asChosen = asOptions[Math.floor(randomFn() * asOptions.length)];
+        var asPick = asChosen.list[Math.floor(randomFn() * asChosen.list.length)];
+        return formatOperand(asPick.x) + " " + asChosen.symbol + " " + formatOperand(asPick.y);
     } else if (op === "addition" || op === "subtraction") {
         for (var d1 = 2; d1 <= maxDen; d1++) {
             var maxN1 = allowImproper ? maxDen * 3 : d1 - 1;
@@ -2329,17 +2561,19 @@ function showMainDialog(palette, initialSettings) {
     var fractionOpGroup = fractionPanel.add("group");
     var fractionAddRadio = fractionOpGroup.add("radiobutton", undefined, "Addition");
     var fractionSubRadio = fractionOpGroup.add("radiobutton", undefined, "Subtraction");
-    var fractionMulRadio = fractionOpGroup.add("radiobutton", undefined, "Multiplication");
-    var fractionDivRadio = fractionOpGroup.add("radiobutton", undefined, "Division");
-    if (initialSettings.fractionOperation === "subtraction") {
-        fractionSubRadio.value = true;
-    } else if (initialSettings.fractionOperation === "multiplication") {
-        fractionMulRadio.value = true;
-    } else if (initialSettings.fractionOperation === "division") {
-        fractionDivRadio.value = true;
-    } else {
-        fractionAddRadio.value = true;
-    }
+    var fractionAddSubRadio = fractionOpGroup.add("radiobutton", undefined, "Add & Sub");
+    var fractionOpGroup2 = fractionPanel.add("group");
+    var fractionMulRadio = fractionOpGroup2.add("radiobutton", undefined, "Multiplication");
+    var fractionDivRadio = fractionOpGroup2.add("radiobutton", undefined, "Division");
+    var fractionOpRadios = [
+        fractionAddRadio,
+        fractionSubRadio,
+        fractionAddSubRadio,
+        fractionMulRadio,
+        fractionDivRadio,
+    ];
+    var fractionOpKeys = ["addition", "subtraction", "addsub", "multiplication", "division"];
+    setFractionOpRadioValues(initialSettings.fractionOperation);
 
     var fractionAnswerTypeGroup = fractionPanel.add("group");
     fractionAnswerTypeGroup.add("statictext", undefined, "Answer type:");
@@ -2370,6 +2604,16 @@ function showMainDialog(palette, initialSettings) {
         fractionPanel,
         "Same denominators only",
         initialSettings.fractionSameDenominatorOnly,
+    );
+    var fractionConstantDenominatorCheckbox = addCheckbox(
+        fractionPanel,
+        "Constant denominator",
+        initialSettings.fractionConstantDenominator,
+    );
+    var fractionDenominatorField = addLabeledField(
+        fractionPanel,
+        "Denominator",
+        initialSettings.fractionDenominator,
     );
     var fractionAllowImproperCheckbox = addCheckbox(
         fractionPanel,
@@ -2562,9 +2806,19 @@ function showMainDialog(palette, initialSettings) {
         return "multiplication";
     }
 
+    function setFractionOpRadioValues(op) {
+        var chosenIdx = indexOfValue(fractionOpKeys, op, 0);
+        for (var ri2 = 0; ri2 < fractionOpRadios.length; ri2++) {
+            fractionOpRadios[ri2].value = ri2 === chosenIdx;
+        }
+    }
+
     function currentFractionOperation() {
         if (fractionSubRadio.value) {
             return "subtraction";
+        }
+        if (fractionAddSubRadio.value) {
+            return "addsub";
         }
         if (fractionMulRadio.value) {
             return "multiplication";
@@ -2618,8 +2872,14 @@ function showMainDialog(palette, initialSettings) {
         fractionMaxWholeMultiplierField.enabled = answerIsInteger;
 
         var op = currentFractionOperation();
-        var sameDenomApplicable = op === "addition" || op === "subtraction";
-        fractionSameDenominatorCheckbox.enabled = sameDenomApplicable;
+        var constApplicable = op === "addition" || op === "subtraction" || op === "addsub";
+        var constActive = constApplicable && fractionConstantDenominatorCheckbox.value;
+        fractionConstantDenominatorCheckbox.enabled = constApplicable;
+        fractionDenominatorField.enabled = constActive;
+        fractionMaxDenominatorField.enabled = !constActive;
+        fractionRequireSimplifiedCheckbox.enabled = !constActive;
+        fractionSameDenominatorCheckbox.enabled =
+            (op === "addition" || op === "subtraction") && !constActive;
     }
 
     function updateRecommendRangeFields() {
@@ -2684,6 +2944,11 @@ function showMainDialog(palette, initialSettings) {
         s.fractionRequireSimplified = fractionRequireSimplifiedCheckbox.value;
         s.fractionSameDenominatorOnly = fractionSameDenominatorCheckbox.value;
         s.fractionAllowImproper = fractionAllowImproperCheckbox.value;
+        s.fractionConstantDenominator = fractionConstantDenominatorCheckbox.value;
+        s.fractionDenominator = parseIntSafe(
+            fractionDenominatorField.text,
+            CONFIG.fractionDenominator,
+        );
 
         s.defaultTextSize = parseFloatSafe(textSizeField.text, CONFIG.defaultTextSize);
         s.minTextSize = parseFloatSafe(minTextSizeField.text, CONFIG.minTextSize);
@@ -2745,15 +3010,7 @@ function showMainDialog(palette, initialSettings) {
         randomMaxDividendField.text = String(s.randomMaxDividend);
         randomizeOrderCheckbox.value = !!s.randomizeOperandOrder;
 
-        if (s.fractionOperation === "subtraction") {
-            fractionSubRadio.value = true;
-        } else if (s.fractionOperation === "multiplication") {
-            fractionMulRadio.value = true;
-        } else if (s.fractionOperation === "division") {
-            fractionDivRadio.value = true;
-        } else {
-            fractionAddRadio.value = true;
-        }
+        setFractionOpRadioValues(s.fractionOperation);
         if (s.fractionAnswerType === "integer") {
             fractionAnswerIntRadio.value = true;
         } else {
@@ -2764,6 +3021,8 @@ function showMainDialog(palette, initialSettings) {
         fractionRequireSimplifiedCheckbox.value = !!s.fractionRequireSimplified;
         fractionSameDenominatorCheckbox.value = !!s.fractionSameDenominatorOnly;
         fractionAllowImproperCheckbox.value = !!s.fractionAllowImproper;
+        fractionConstantDenominatorCheckbox.value = !!s.fractionConstantDenominator;
+        fractionDenominatorField.text = String(s.fractionDenominator);
 
         textSizeField.text = String(s.defaultTextSize);
         minTextSizeField.text = String(s.minTextSize);
@@ -2863,6 +3122,51 @@ function showMainDialog(palette, initialSettings) {
             };
         }
 
+        if (isConstantDenominatorActive(s)) {
+            var constDen = s.fractionDenominator;
+            if (typeof constDen !== "number" || isNaN(constDen) || constDen < 2 || Math.floor(constDen) !== constDen) {
+                return {
+                    ok: false,
+                    message: "Constant denominator must be a whole number of 2 or more.",
+                };
+            }
+
+            var denomLines = [];
+            for (var k = 0; k < rowsList.length; k++) {
+                if (!rowsList[k].includeCheck.value) {
+                    continue;
+                }
+                var hex3 = rowsList[k].hex;
+                var parsed3 = parseAnswer(s.colorAnswers[hex3]);
+                if (!parsed3.ok || parsed3.kind === "int" || parsed3.den === constDen) {
+                    continue;
+                }
+                var scaled = (parsed3.num * constDen) / parsed3.den;
+                var shown = trimString(String(s.colorAnswers[hex3]));
+                if (Math.abs(scaled - Math.round(scaled)) < 0.0000001) {
+                    denomLines.push(
+                        "  " + hex3 + ": " + shown + " \u2192 use " + Math.round(scaled) + "/" + constDen,
+                    );
+                } else {
+                    denomLines.push(
+                        "  " + hex3 + ": " + shown + " (cannot be written with denominator " + constDen + ")",
+                    );
+                }
+            }
+
+            if (denomLines.length > 0) {
+                return {
+                    ok: false,
+                    message:
+                        "Constant denominator is " +
+                        constDen +
+                        ", but these answers use a different denominator:\n" +
+                        denomLines.join("\n") +
+                        "\n\nWhole-number answers are allowed.",
+                };
+            }
+        }
+
         return { ok: true };
     }
 
@@ -2919,12 +3223,20 @@ function showMainDialog(palette, initialSettings) {
     }
     randomizeOrderCheckbox.onClick = runAutoFillIfNotEdited;
 
-    var fractionOpRadios = [fractionAddRadio, fractionSubRadio, fractionMulRadio, fractionDivRadio];
-    for (var foi = 0; foi < fractionOpRadios.length; foi++) {
-        fractionOpRadios[foi].onClick = function () {
+    function makeFractionOpClickHandler(self) {
+        return function () {
+            for (var ri3 = 0; ri3 < fractionOpRadios.length; ri3++) {
+                if (fractionOpRadios[ri3] !== self) {
+                    fractionOpRadios[ri3].value = false;
+                }
+            }
+            self.value = true;
             updateFractionFieldStates();
             runAutoFillIfNotEdited();
         };
+    }
+    for (var foi = 0; foi < fractionOpRadios.length; foi++) {
+        fractionOpRadios[foi].onClick = makeFractionOpClickHandler(fractionOpRadios[foi]);
     }
 
     fractionAnswerFracRadio.onClick = function () {
@@ -2939,12 +3251,17 @@ function showMainDialog(palette, initialSettings) {
     var fractionFieldsForAutoFill = [
         fractionMaxDenominatorField,
         fractionMaxWholeMultiplierField,
+        fractionDenominatorField,
     ];
     for (var ffi = 0; ffi < fractionFieldsForAutoFill.length; ffi++) {
         fractionFieldsForAutoFill[ffi].onChange = runAutoFillIfNotEdited;
     }
     fractionRequireSimplifiedCheckbox.onClick = runAutoFillIfNotEdited;
     fractionSameDenominatorCheckbox.onClick = runAutoFillIfNotEdited;
+    fractionConstantDenominatorCheckbox.onClick = function () {
+        updateFractionFieldStates();
+        runAutoFillIfNotEdited();
+    };
     fractionAllowImproperCheckbox.onClick = runAutoFillIfNotEdited;
 
     autoFillBtn.onClick = function () {
@@ -5273,12 +5590,22 @@ function describeModeForSummary(s) {
         return "Random (" + s.randomOperation + ")";
     }
     if (s.mode === "fraction") {
+        var opLabel = s.fractionOperation;
+        if (opLabel === "addsub") {
+            opLabel = "add & sub";
+        }
+        var denomLabel = "";
+        if (isConstantDenominatorActive(s)) {
+            denomLabel = ", denominator " + s.fractionDenominator;
+        }
         return (
             "Fractions (" +
-            s.fractionOperation +
+            opLabel +
             ", " +
             (s.fractionAnswerType === "integer" ? "integer" : "fraction") +
-            " answers)"
+            " answers" +
+            denomLabel +
+            ")"
         );
     }
     return String(s.mode);
